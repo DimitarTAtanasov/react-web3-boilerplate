@@ -16,10 +16,14 @@ import {
   BOOK_LIBRARY_ADDRESS
 } from './constants';
 import BOOK_LIBRARY from './constants/abi/BookLibrary.json';
+import LIB_TOKEN from './constants/abi/LibToken.json';
+import WRAPPER_CONTRACT from './constants/abi/WrapperContract.json';
 import { getContract } from './helpers/ethers';
 import { logMsg } from './helpers/dev';
-import AddBookForm from './components/ResultSubmitForm'
-import BooksList from './components/BooksList'
+import AddBookForm from './components/ResultSubmitForm';
+import BooksList from './components/BooksList';
+import ErrorMessage from './components/ErrorMessage';
+import { ethers } from 'ethers';
 
 const SLayout = styled.div`
   position: relative;
@@ -59,6 +63,8 @@ const SBalances = styled(SLanding)`
 interface IAppState {
   fetching: boolean;
   address: string;
+  tokenAddress: string;
+  wrapperAddress: string;
   library: any;
   connected: boolean;
   chainId: number;
@@ -66,6 +72,8 @@ interface IAppState {
   result: any | null;
   info: any | null;
   bookLibraryContract: any | null;
+  wrapperContract: any | null;
+  tokenContract: any | null;
   errorFlag: any | null;
   errorMessage: any | null;
   transactionHash: any | null;
@@ -76,11 +84,18 @@ interface IAppState {
   fetchingBorrowBook: boolean;
   fetchingBorrowedBooksList: boolean;
   fetchingReturnBook: boolean;
+  fetchingunWrapTokens: boolean;
+  userBalance: any | null;
+  contractBalance: any | null;
+  contractETHBalance: any | null;
+  rentPrice: any | null;
 }
 
 const INITIAL_STATE: IAppState = {
   fetching: false,
   address: '',
+  tokenAddress: '',
+  wrapperAddress: '',
   library: null,
   connected: false,
   chainId: 1,
@@ -88,6 +103,8 @@ const INITIAL_STATE: IAppState = {
   result: null,
   info: null,
   bookLibraryContract: null,
+  wrapperContract: null,
+  tokenContract: null,
   errorFlag: null,
   errorMessage: null,
   transactionHash: null,
@@ -97,7 +114,12 @@ const INITIAL_STATE: IAppState = {
   fetchingBooksList: false,
   fetchingBorrowBook: false,
   fetchingBorrowedBooksList: false,
-  fetchingReturnBook: false
+  fetchingReturnBook: false,
+  fetchingunWrapTokens: false,
+  userBalance: null,
+  contractBalance: null,
+  contractETHBalance: null,
+  rentPrice: null
 };
 
 class App extends React.Component<any, any> {
@@ -135,16 +157,35 @@ class App extends React.Component<any, any> {
     const address = this.provider.selectedAddress ? this.provider.selectedAddress : this.provider?.accounts[0];
     const bookLibraryContract = getContract(BOOK_LIBRARY_ADDRESS, BOOK_LIBRARY.abi, library, address);
 
+    const tokenAddress = await bookLibraryContract.LIBToken();
+    const tokenContract = getContract(tokenAddress, LIB_TOKEN.abi, library, address);
+    logMsg(tokenAddress)
+
+    const wrapperAddress = await bookLibraryContract.wrapperContract();
+
+    logMsg(wrapperAddress)
+
+    const wrapperContract = getContract(wrapperAddress, WRAPPER_CONTRACT.abi, library, address);
+
     await this.setState({
       library,
       chainId: network.chainId,
       address,
       connected: true,
       bookLibraryContract,
+      tokenAddress,
+      tokenContract,
+      wrapperAddress,
+      wrapperContract
+      // userBalance: balanceTry
     });
 
     await this.getAvailableBooks();
     await this.getBorrowedBooks();
+    await this.getUserBalance();
+    await this.getContractBalance();
+
+    await this.getRentPrice();
     await this.subscribeToProviderEvents(this.provider);
 
   };
@@ -160,14 +201,18 @@ class App extends React.Component<any, any> {
     this.state.bookLibraryContract.on("NewBookAdded", this.getAvailableBooks);
     this.state.bookLibraryContract.on("BookBorrowed", this.getAvailableBooks);
     this.state.bookLibraryContract.on("BookBorrowed", this.getBorrowedBooks);
+    this.state.bookLibraryContract.on("BookBorrowed", this.getUserBalance);
+    this.state.bookLibraryContract.on("BookBorrowed", this.getContractBalance);
     this.state.bookLibraryContract.on("BookReturned", this.getAvailableBooks);
     this.state.bookLibraryContract.on("BookReturned", this.getBorrowedBooks);
+
+    this.state.bookLibraryContract.on("UnwrapInBookContract", (amount: any) => {logMsg(ethers.utils.formatEther(amount))});
+    this.state.wrapperContract.on("UnwrapInWrapperContract", (amount: any) => {logMsg(ethers.utils.formatEther(amount))});
 
     await this.web3Modal.off('accountsChanged');
   };
 
   public async unSubscribe(provider: any) {
-    // Workaround for metamask widget > 9.0.3 (provider.off is undefined);
     window.location.reload(false);
     if (!provider.off) {
       return;
@@ -242,6 +287,9 @@ class App extends React.Component<any, any> {
       if (e.error) {
         this.setErrorMessage(e.error.message)
       }
+      else if(e.data) {
+        this.setErrorMessage(e.data.message)
+      }
     }
     finally {
       this.setState({ fetchingAddBook: false })
@@ -257,7 +305,7 @@ class App extends React.Component<any, any> {
     }
   }
 
-  public clearErorr = () => {
+  public clearError = () => {
     this.setState({ errorFlag: false, errorMessage: null })
   }
 
@@ -315,11 +363,15 @@ class App extends React.Component<any, any> {
   }
 
   public borrowBook = async (bookId: string) => {
-    const { bookLibraryContract } = this.state;
+    const { bookLibraryContract, tokenContract, rentPrice } = this.state;
 
     this.setState({ fetchingBorrowBook: true });
 
     try {
+
+      const approveTx = await tokenContract.approve(BOOK_LIBRARY_ADDRESS, rentPrice);
+      await approveTx.wait();
+
       const transaction = await bookLibraryContract.borrowBookById(bookId);
 
       this.setState({ transactionHash: transaction.hash });
@@ -333,6 +385,9 @@ class App extends React.Component<any, any> {
       logMsg(e)
       if (e.error) {
         this.setErrorMessage(e.error.message)
+      }
+      else if(e.data) {
+        this.setErrorMessage(e.data.message)
       }
     }
     finally {
@@ -361,11 +416,98 @@ class App extends React.Component<any, any> {
       if (e.error) {
         this.setErrorMessage(e.error.message)
       }
+      else if(e.data) {
+        this.setErrorMessage(e.data.message)
+      }
     }
     finally {
       this.setState({ fetchingReturnBook: false })
 
     }
+  }
+
+  public getUserBalance = async () => {
+    const { tokenContract, address } = this.state;
+
+    const userBalance1 = await tokenContract.balanceOf(address);
+
+    const userBalance = ethers.utils.formatEther(userBalance1)
+
+    this.setState({ userBalance });
+  }
+
+  public getContractBalance = async () => {
+
+    const { tokenContract, library, wrapperAddress } = this.state;
+
+    const contractBalance1 = await tokenContract.balanceOf(BOOK_LIBRARY_ADDRESS);
+
+    const contractBalance = ethers.utils.formatEther(contractBalance1)
+
+    const contractETHBalance1 = await library.getBalance(wrapperAddress)
+
+    const contractETHBalance = ethers.utils.formatEther(contractETHBalance1)
+
+    this.setState({ contractBalance, contractETHBalance });
+  }
+
+  public buyLibTokens = async () => {
+    const { wrapperContract } = this.state;
+
+    const wrapValue = ethers.utils.parseEther("0.1");
+
+    const wrapTx = await wrapperContract.wrap({value: wrapValue})
+    await wrapTx.wait();
+
+    await this.getUserBalance()
+    await this.getContractBalance()
+  }
+
+  public unWrapTokenIntoContract = async () => {
+    const { bookLibraryContract } = this.state;
+
+    this.setState({ fetchingunWrapTokens: true });
+    try {
+
+      const wrapValue = ethers.utils.parseEther("0.01")
+
+      const transaction = await bookLibraryContract.exchangeTokens(wrapValue);
+
+      this.setState({ transactionHash: transaction.hash });
+
+      const transactionReceipt = await transaction.wait();
+      if (transactionReceipt.status !== 1) {
+        // React to failure
+      }
+
+    }
+    catch (e) {
+      logMsg(e)
+      if (e.error) {
+        this.setErrorMessage(e.error.message)
+      }
+      else if(e.data) {
+        this.setErrorMessage(e.data.message)
+      }
+    }
+    finally {
+      this.setState({ fetchingunWrapTokens: false })
+
+    }
+
+    await this.getUserBalance();
+    await this.getContractBalance();
+    
+  }
+
+
+
+  public getRentPrice = async () => {
+    const { bookLibraryContract } = this.state;
+
+    const rentPrice = await bookLibraryContract.rentPrice();
+
+    this.setState({rentPrice})
   }
 
   public render = () => {
@@ -381,7 +523,9 @@ class App extends React.Component<any, any> {
       fetchingReturnBook,
       transactionHash,
       availableBooks,
-      borrowedBooks
+      borrowedBooks,
+      errorFlag,
+      errorMessage
     } = this.state;
     return (
       <SLayout>
@@ -410,31 +554,52 @@ class App extends React.Component<any, any> {
                       addBook={this.addBook}
                       transactionHash={transactionHash}
                       fetchingAddBook={fetchingAddBook}
-                    /> 
+                    />
                     <BooksList
                       itemsList={availableBooks || []}
-                      onClick={this.borrowBook} 
+                      onClick={this.borrowBook}
                       fetchingList={fetchingBooksList}
                       fetchingOnClickAction={fetchingBorrowBook}
                       transactionHash={transactionHash}
                       title={"Books list (click over title if you want to rent certain book)"}
                       showQuantity={true}
                     />
-
                     <BooksList
                       itemsList={borrowedBooks || []}
-                      onClick={this.returnBook} 
+                      onClick={this.returnBook}
                       fetchingList={fetchingBorrowedBooksList}
                       fetchingOnClickAction={fetchingReturnBook}
                       transactionHash={transactionHash}
                       title={"Your rented books (click over a title to return the book)"}
                       showQuantity={false}
                     />
+                    <div>
+                      {this.state.fetchingunWrapTokens ? (
+                          <Column center>
+                        <SContainer>
+                          <Loader />
+                        </SContainer>
+              </Column>
+                      ) : (
+                        <div>
+                        <span>{`Your current LIBToken balance is: ${this.state.userBalance}`}</span>
+                      <button onClick={this.buyLibTokens}>Buy LIBToken</button>
+                        </div>
 
+                      )}
+
+                    </div>
+                    <div>
+                      <span>{`Contract LIBToken balance is: ${this.state.contractBalance}`}</span>
+                      <button onClick={this.unWrapTokenIntoContract}>take back your ETH</button>
+                    </div>
+                    <div>
+                      <span>{`Contract ETH balance is: ${this.state.contractETHBalance}`}</span>
+                    </div>
                   </div>
-
                 }
-                {this.state.errorFlag && <div onClick={this.clearErorr}>{this.state.errorMessage}</div>}
+                <hr/>
+                <ErrorMessage errorFlag={errorFlag} errorMessage={errorMessage} clearError={this.clearError} />
               </SLanding>
             )}
           </SContent>
